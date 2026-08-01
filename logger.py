@@ -3,6 +3,11 @@
 
 Fetches the current İSPARK parking status and appends one row per
 parking lot to a daily CSV file under data/YYYY-MM/YYYY-MM-DD.csv.
+
+The workflow fires every 10 minutes because GitHub's scheduled runs are
+best-effort and get dropped under load. Only the first successful run of
+each clock hour writes anything; later runs in the same hour exit early,
+so the CSV keeps at most one snapshot per hour.
 """
 
 import csv
@@ -50,6 +55,43 @@ def log_error(message):
     timestamp = datetime.now(timezone.utc).isoformat()
     with open(ERROR_LOG_PATH, "a", encoding="utf-8") as f:
         f.write(f"[{timestamp}] {message}\n")
+
+
+def csv_path_for(now_istanbul):
+    month_dir = os.path.join(DATA_DIR, now_istanbul.strftime("%Y-%m"))
+    return os.path.join(month_dir, now_istanbul.strftime("%Y-%m-%d") + ".csv")
+
+
+def last_logged_hour(csv_path):
+    """Return the Istanbul hour of the final row, or None if unavailable.
+
+    Rows are only ever appended, so the last line is the most recent
+    snapshot. Read the tail instead of parsing the whole file, which grows
+    to roughly a megabyte over a full day.
+    """
+    if not os.path.isfile(csv_path):
+        return None
+    try:
+        with open(csv_path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            window = min(size, 8192)
+            f.seek(size - window)
+            tail = f.read(window).decode("utf-8", errors="replace")
+    except OSError as exc:
+        log_error(f"could not read tail of {csv_path}: {exc}")
+        return None
+
+    for line in reversed(tail.splitlines()):
+        line = line.strip()
+        if not line or line.startswith("fetch_utc"):
+            continue
+        try:
+            fetch_istanbul = next(csv.reader([line]))[1]
+            return datetime.fromisoformat(fetch_istanbul).hour
+        except (StopIteration, IndexError, ValueError):
+            continue
+    return None
 
 
 def fetch_parks():
@@ -116,9 +158,8 @@ def build_rows(parks, fetch_utc, fetch_istanbul):
 
 
 def write_rows(rows, now_istanbul):
-    month_dir = os.path.join(DATA_DIR, now_istanbul.strftime("%Y-%m"))
-    os.makedirs(month_dir, exist_ok=True)
-    csv_path = os.path.join(month_dir, now_istanbul.strftime("%Y-%m-%d") + ".csv")
+    csv_path = csv_path_for(now_istanbul)
+    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
 
     file_exists = os.path.isfile(csv_path)
     with open(csv_path, "a", encoding="utf-8", newline="") as f:
@@ -135,6 +176,11 @@ def main():
     now_istanbul = now_utc.astimezone(ISTANBUL_TZ)
     fetch_utc = now_utc.isoformat()
     fetch_istanbul = now_istanbul.isoformat()
+
+    csv_path = csv_path_for(now_istanbul)
+    if last_logged_hour(csv_path) == now_istanbul.hour:
+        print(f"hour {now_istanbul.hour:02d} already logged, skipping")
+        return 0
 
     try:
         parks = fetch_parks()
