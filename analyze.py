@@ -16,7 +16,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 
-MIN_OBSERVATIONS = 3
+MIN_OBSERVATIONS = 3  # distinct fetch timestamps, not CSV rows
 DAY_TYPES = ["weekday", "friday", "saturday", "sunday"]
 
 
@@ -49,7 +49,12 @@ def to_float(value):
 def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    # (district, day_type, hour) -> [sum_ratio, count]
+    # (district, day_type, hour) -> [sum_ratio, count, {fetch timestamps}]
+    #
+    # Every fetch writes one row per parking lot, so counting rows would let a
+    # single snapshot clear MIN_OBSERVATIONS for any district with three or
+    # more lots. Count distinct fetch timestamps instead: the guard is about
+    # having sampled an hour several times, not about lot count.
     district_hourly = {}
     # district -> [sum_ratio, count]
     district_overall = {}
@@ -86,9 +91,10 @@ def main():
         districts_seen.add(district)
 
         key = (district, day_type, hour)
-        entry = district_hourly.setdefault(key, [0.0, 0])
+        entry = district_hourly.setdefault(key, [0.0, 0, set()])
         entry[0] += ratio
         entry[1] += 1
+        entry[2].add(fetch_istanbul)
 
         d_entry = district_overall.setdefault(district, [0.0, 0])
         d_entry[0] += ratio
@@ -113,7 +119,7 @@ def main():
             hours = []
             for hour in range(24):
                 entry = district_hourly.get((district, day_type, hour))
-                if entry is None or entry[1] < MIN_OBSERVATIONS:
+                if entry is None or len(entry[2]) < MIN_OBSERVATIONS:
                     hours.append(None)
                     continue
                 avg_ratio = entry[0] / entry[1]
